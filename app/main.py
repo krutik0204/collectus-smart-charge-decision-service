@@ -105,27 +105,45 @@ def decide(body: DecisionRequest) -> DecisionResponse:
             model_version=model.version,
             declines_left=declines_left,
         )
-    elif schedule_mode:
-        # Scheduled attempt: charge the full overdue only if worth spending a decline on.
-        bar = policy.schedule_min_prob(declines_left, settings)
-        row = policy.feature_row(base, 1.0)
-        p = float(model.predict(row.reshape(1, -1))[0])
-        drivers = model.drivers(row)
+    elif schedule_mode or settings.repayment_policy == "full_gate":
+        # Charge the full overdue only if it's worth spending a decline on.
+        p_arr, bar_arr, go_arr = policy.full_charge_gate(
+            model, [base], [declines_left], settings, scheduled=schedule_mode
+        )
+        p, bar, go = float(p_arr[0]), float(bar_arr[0]), bool(go_arr[0])
+        drivers = model.drivers(policy.feature_row(base, 1.0))
         why = ", ".join(f"{d['direction']}{d['label']}" for d in drivers)
-        go = p >= bar
+        moment = "Scheduled attempt" if schedule_mode else "Repayment moment"
+        budget = (
+            f" Decline budget: {declines_left} left this month, so the bar is {bar:.0%}."
+            if declines_left is not None and declines_left <= 1
+            else ""
+        )
+        if go:
+            verdict = f"charge the full {body.currency} {body.overdue_amount:.2f} now"
+        else:
+            verdict = "skip and keep the decline for a better moment"
         response = DecisionResponse(
             action=DecisionAction.CHARGE if go else DecisionAction.SKIP,
             amount=round(body.overdue_amount, 2) if go else 0.0,
             score=round(p, 4),
             reason=(
-                f"Scheduled attempt: P(success) {p:.0%} "
-                f"{'clears' if go else 'is below'} the {bar:.0%} bar — "
-                f"{'charge' if go else 'skip and save the decline'}. Drivers: {why}"
+                f"{moment}: P(success) {p:.0%} {'clears' if go else 'is below'} the "
+                f"{bar:.0%} bar — {verdict}.{budget} Drivers: {why}"
             ),
             next_best_action=(
-                None if go else "Wait for a repayment event or the payday window; keep the decline"
+                None if go else policy.next_best_action(base, np.array([p]), declines_left)
             ),
             drivers=drivers,
+            candidates=(
+                []
+                if schedule_mode
+                else policy.summarize_candidates(
+                    policy.choose_many(model, [base], np.array([body.overdue_amount]), settings)[1][0],
+                    body.overdue_amount,
+                    settings,
+                )
+            ),
             model_version=model.version,
             declines_left=declines_left,
             min_success_prob_applied=bar,

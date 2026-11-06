@@ -12,7 +12,7 @@ import numpy as np
 
 from app.config import Settings
 from app.model import TrainedModel
-from app.policy import choose_many
+from app.policy import choose_many, full_charge_gate
 from app.schemas import BacktestResponse, StrategyResult
 from app.world import payday_window, sample_customers, true_success_probability
 
@@ -78,10 +78,15 @@ def run(model: TrainedModel, settings: Settings, n: int, seed: int) -> BacktestR
         }
         for i in range(n)
     ]
-    choices, _ = choose_many(model, bases, overdue, settings)
     gated = x["fails_7d"] >= settings.max_fails_7d
-    attempted = np.array([c.action != "skip" for c in choices]) & ~gated
-    fraction = np.array([c.fraction if c.action != "skip" else 1.0 for c in choices])
+    if settings.repayment_policy == "full_gate":
+        _, _, go = full_charge_gate(model, bases, [None] * n, settings, scheduled=False)
+        attempted = go & ~gated
+        fraction = np.ones(n)
+    else:
+        choices, _ = choose_many(model, bases, overdue, settings)
+        attempted = np.array([c.action != "skip" for c in choices]) & ~gated
+        fraction = np.array([c.fraction if c.action != "skip" else 1.0 for c in choices])
     smart_amount = np.round(overdue * fraction, 2)
     smart = _result("smart_charge", attempted, smart_amount, outcome(1, fraction, repay), settings)
 

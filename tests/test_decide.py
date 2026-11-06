@@ -28,7 +28,8 @@ def test_demo_personas():
         layla = client.post("/v1/decide", json=_body("t_layla", 0.6, 1, 0.55, 249.75)).json()
     assert aisha["action"] == "charge" and aisha["amount"] == 45.0
     assert omar["action"] == "skip" and omar["amount"] == 0
-    assert layla["action"] == "partial" and 0 < layla["amount"] < 249.75
+    # Full-charge gate: the repayment moment is the best chance, so charge it all
+    assert layla["action"] == "charge" and layla["amount"] == 249.75
 
 
 def test_hard_gates():
@@ -63,11 +64,12 @@ def _with(body, **extra):
 def test_decline_budget_raises_the_bar():
     with TestClient(app) as client:
         normal_day = "2026-11-06"  # outside the payday window
-        plenty = client.post("/v1/decide", json=_with(_body("t_b3", 0.55, 2, 0.45, 249.75, as_of=normal_day), features={"declines_left": 3})).json()
-        last = client.post("/v1/decide", json=_with(_body("t_b1", 0.55, 2, 0.45, 249.75, as_of=normal_day), features={"declines_left": 1})).json()
+        reem = lambda eid, left: _with(_body(eid, 0.5, 3, 0.4, 249.75, as_of=normal_day), features={"declines_left": left})
+        plenty = client.post("/v1/decide", json=reem("t_b3", 3)).json()
+        last = client.post("/v1/decide", json=reem("t_b1", 1)).json()
         none = client.post("/v1/decide", json=_with(_body("t_b0", 0.9, 0, 0.85, 45.0), features={"declines_left": 0})).json()
-    assert plenty["action"] == "partial"
-    assert last["action"] == "skip" and last["min_success_prob_applied"] == 0.75
+    assert plenty["action"] == "charge" and plenty["amount"] == 249.75
+    assert last["action"] == "skip" and last["min_success_prob_applied"] == 0.30
     assert "decline" in last["next_best_action"].lower()
     assert none["action"] == "skip" and "Decline budget used up" in none["gate"]
 

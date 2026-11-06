@@ -19,7 +19,7 @@ import numpy as np
 
 from app.config import Settings
 from app.model import TrainedModel
-from app.policy import choose_many, feature_row, schedule_min_prob
+from app.policy import choose_many, full_charge_gate
 from app.schemas import MonthBacktestResponse, MonthStrategyResult
 from app.world import payday_window, sample_customers, true_success_probability
 
@@ -167,39 +167,38 @@ def run(model: TrainedModel, settings: Settings, n: int, seed: int, budget: int,
             return out
         return decide
 
-    def full_unless_gated(mask: np.ndarray, s: dict) -> np.ndarray:
-        return np.where(mask & (s["fails_7d"] < settings.max_fails_7d), 1.0, 0.0)
-
-    def ai_gated_cron(mask: np.ndarray, s: dict) -> np.ndarray:
-        """Same as schedule mode in /v1/decide: full charge only if P clears the bar."""
-        idx = np.flatnonzero(mask)
-        out = np.zeros(world.n)
-        if idx.size == 0:
+    def ai_full_gate(scheduled: bool) -> Policy:
+        """Same as /v1/decide: charge the full overdue only if P clears the bar."""
+        def decide(mask: np.ndarray, s: dict) -> np.ndarray:
+            idx = np.flatnonzero(mask & (s["fails_7d"] < settings.max_fails_7d))
+            out = np.zeros(world.n)
+            if idx.size == 0:
+                return out
+            bases = [
+                {
+                    "pm_health": x["pm_health"][i],
+                    "recent_success": x["recent_success"][i],
+                    "fails_7d": s["fails_7d"][i],
+                    "days_overdue": s["days_overdue"][i],
+                    "repayment_strength": 0.0 if scheduled else s["repay"][i],
+                    "trigger_event": 0 if scheduled else 1,
+                    "payday_window": s["payday"],
+                }
+                for i in idx
+            ]
+            _, _, go = full_charge_gate(model, bases, [int(s["declines_left"][i]) for i in idx],
+                                        settings, scheduled)
+            out[idx] = np.where(go, 1.0, 0.0)
             return out
-        rows = np.array([
-            feature_row({
-                "pm_health": x["pm_health"][i],
-                "recent_success": x["recent_success"][i],
-                "fails_7d": s["fails_7d"][i],
-                "days_overdue": s["days_overdue"][i],
-                "repayment_strength": 0.0,
-                "trigger_event": 0,
-                "payday_window": s["payday"],
-            }, 1.0)
-            for i in idx
-        ])
-        p = model.predict(rows)
-        bar = np.array([schedule_min_prob(int(s["declines_left"][i]), settings) for i in idx])
-        out[idx] = np.where(p >= bar, 1.0, 0.0)
-        return out
+        return decide
 
     strategies = [
         _simulate(world, "cron_only", budget, None, full, settings),
         _simulate(world, "cron_plus_always_charge_on_repayment", budget, full, full, settings),
         _simulate(world, "cron_plus_simple_rule_on_repayment", budget, rule, full, settings),
         _simulate(world, "cron_plus_smart_partials_on_repayment", budget, smart(1), full, settings),
-        _simulate(world, "charge_on_repayment_plus_ai_gated_cron", budget, full_unless_gated,
-                  ai_gated_cron, settings),
+        _simulate(world, "charge_on_repayment_plus_ai_gated_cron", budget, ai_full_gate(False),
+                  ai_full_gate(True), settings),
     ]
     by = {s.strategy: s for s in strategies}
     cron, naive = by["cron_only"], by["cron_plus_always_charge_on_repayment"]

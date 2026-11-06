@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     budget_min_prob_1_left: float = 0.75
     budget_harm_multiplier_1_left: float = 2.0
 
+    # Repayment moments: "full_gate" (charge full overdue if P clears the bar — best in the
+    # 30-day backtest) or "expected_value" (pick 100/75/50/25% by EV — partials)
+    repayment_policy: str = "full_gate"
+    repayment_min_prob: float = 0.10
+    repayment_min_prob_last_decline: float = 0.30  # sweet spot in the 30-day backtest
+
     # Schedule mode: AI approves or blocks a scheduled (cron) attempt for the full overdue
     schedule_min_prob: float = 0.10
     schedule_min_prob_last_decline: float = 0.50

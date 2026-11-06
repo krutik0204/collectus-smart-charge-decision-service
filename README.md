@@ -6,39 +6,35 @@ Stateless brain: features in → `{action, amount, score, reason}` out.
 ```
 Frontend → rpm-autopay-service ──POST /v1/decide──▶ smart-charge-decision-service
                     │                                   (trained model + policy)
-                    └── Autopay (if charge/partial)
+                    └── Autopay (if charge)
 ```
 
 ## How it decides
 
-1. **Hard gates** — no overdue, attempt cap (`fails_7d ≥ 5`), duplicate `event_id` (idempotent replay).
+1. **Hard gates** — no overdue, attempt cap (`fails_7d ≥ 5`), no declines left this month,
+   duplicate `event_id` (idempotent replay).
 2. **Model** — logistic regression trained on 20k historical autocharge attempts
-   (`data/historical_charges.csv`) predicts **P(success)** for each candidate amount
-   (100 / 75 / 50 / 25% of overdue).
-3. **Expected-value policy** —
-   `EV = P × amount − (1 − P) × (fail_fee + harm_weight × amount)`.
-   Best positive EV wins → `charge` (100%) or `partial`; otherwise `skip` + next best action.
-4. **Explanation** — top feature drivers (coef × standardized value) in the reason string.
+   (`data/historical_charges.csv`) predicts **P(success)** of charging the full overdue now.
+3. **Full-charge gate** — charge the full overdue if P clears the bar, otherwise skip and keep the
+   decline for a better moment:
 
-Human-set policy limits (`MIN_SUCCESS_PROB`, `HARM_WEIGHT`, `MAX_CHARGE`, `MAX_FAILS_7D`…) always sit above the model.
+| Moment | Normal bar | Last decline of the month | No declines left |
+| --- | --- | --- | --- |
+| Repayment (`repayment.succeeded`) | 10% | 30% | skip |
+| Scheduled cron day (`schedule.due`) | 10% | 50% | skip |
 
-### Decline budget
+4. **Explanation** — top feature drivers (coef × standardized value) in the reason string, plus
+   the next best action when it skips (update card, wait for payday, save the decline…).
 
-Schemes allow only a few declines per card per month (Mada 3, Visa/MC 6). Send
-`features.declines_left` and the bar to spend one rises as slots run out:
+Why no partials? The 30-day backtest showed partial charges at the repayment moment don't pay off:
+the remainder falls back to cron, which charges on a worse day and fails. The repayment moment is
+usually the customer's best chance all month, so charge it in full; spend AI judgement on whether a
+decline is worth using. The expected-value partial policy is still available with
+`REPAYMENT_POLICY=expected_value`.
 
-| Declines left | Behaviour |
-| --- | --- |
-| not sent / 3+ | normal policy |
-| 2 | P(success) ≥ 60%, failures weighted 1.5× |
-| 1 | P(success) ≥ 75%, failures weighted 2× — save it for a stronger moment |
-| 0 | hard skip |
-
-### Schedule mode (AI-gated cron)
-
-`event_type: "schedule.due"` asks whether a scheduled cron attempt for the full overdue is worth a
-decline. It charges only if P(success) ≥ 10% (≥ 50% when it's the last decline); otherwise it skips
-and keeps the decline for a repayment or payday.
+Schemes allow only a few declines per card per month (Mada 3, Visa/MC 6) — send
+`features.declines_left` so the model can guard the last one. Human-set limits always sit above
+the model.
 
 ## Historical data
 
@@ -79,7 +75,7 @@ AI_DECISION_URL=http://127.0.0.1:8001/v1/decide
 | --- | --- | --- |
 | POST | `/v1/decide` | Decision for a `repayment.succeeded` event (contract used by backend) |
 | POST | `/v1/backtest/month` | 30-day simulation with decline budgets: 5 strategies incl. a simple non-AI rule |
-| POST | `/v1/backtest` | Cron vs always-charge vs smart on N simulated customers (`harm_weight` dial optional) |
+| POST | `/v1/backtest` | One moment: cron vs always-charge vs active policy |
 | GET | `/v1/model` | Version, coefficients, AUC/Brier, history stats, policy limits |
 | POST | `/v1/model/retrain` | Retrain from history |
 | GET | `/health` | Health + model version |
@@ -89,38 +85,37 @@ AI_DECISION_URL=http://127.0.0.1:8001/v1/decide
 ```json
 POST /v1/decide
 {
-  "event_id": "evt_1", "customer_id": "c_partial_001",
+  "event_id": "evt_1", "customer_id": "c_recover_001",
   "amount_paid": 249.75, "overdue_amount": 249.75,
-  "features": {"days_overdue": 15, "pm_health": 0.6, "fails_7d": 1,
-               "recent_success": 0.55, "repayment_strength": 1.0}
+  "features": {"days_overdue": 14, "pm_health": 0.5, "fails_7d": 3,
+               "recent_success": 0.4, "repayment_strength": 1.0, "declines_left": 1}
 }
 → {
-  "action": "partial", "amount": 124.88, "score": 0.81,
-  "reason": "Full SAR 249.75 only 61% likely; 50% (SAR 124.88) is 81% — best expected recovery, partial charge. Drivers: …",
-  "baseline_action": "charge", "expected_value": 64.7,
-  "drivers": [...], "candidates": [...], "model_version": "logreg-…"
+  "action": "skip", "amount": 0.0, "score": 0.19,
+  "reason": "Repayment moment: P(success) 19% is below the 30% bar — skip and keep the decline for a better moment. Decline budget: 1 left this month, so the bar is 30%. Drivers: …",
+  "next_best_action": "Save the last 1 decline(s) for a stronger moment: next repayment or payday window",
+  "drivers": [...], "candidates": [...], "declines_left": 1, "min_success_prob_applied": 0.3
 }
 ```
 
 ## Demo personas (seeded in backend)
 
-| Customer | Result | Why |
-| --- | --- | --- |
-| Aisha · `c_charge_001` | **charge** SAR 45 · P 91% | Healthy PM, just repaid |
-| Omar · `c_skip_001` | **skip** · P 7% | 4 recent fails, weak PM → nudge to update card |
-| Layla · `c_partial_001` | **partial** SAR 124.88 · P 81% | Full amount only 61% likely; half maximizes EV |
-
-## Backtest (2,000 customers, default policy)
-
-| Strategy | Success | Failed attempts | Recovered |
+| Customer | Declines left | Result | Why |
 | --- | --- | --- | --- |
-| Cron nightly | 18% | 1,637 | SAR 112k |
-| Always charge on event | 47% | 1,056 | SAR 287k |
-| **Smart charge** | **75%** | **404 (−62%)** | SAR 200k |
+| Aisha | 3 | **charge** SAR 45 · P 86–91% | Healthy card, just repaid |
+| Omar | 2 | **skip** · P 4–7% | Below the 10% bar → ask to update card |
+| Layla | 2 | **charge** SAR 249.75 · P 49–61% | Repayment moment clears the bar |
+| Fahad | 0 | **skip** (hard gate) | No declines left / 5 fails this week |
+| Noura | 3 | **charge** SAR 1,049.50 · P 67–77% | Large balance, good odds |
+| Khalid | 3 | **charge** SAR 374.75 · P 46–58% | 2 months overdue, still worth it now |
+| Reem | 1 | **skip** · P 19–28% | Last decline needs 30% → save it |
+| Yusuf | 3 | **charge** SAR 175 · P 82–88% | Clears two orders |
+| Sara | 3 | no call | Nothing else overdue |
 
-`harm_weight` trades recovery for customer friction: at `0.25` smart recovers SAR 271k
-(94% of naive) with 38% fewer failed attempts. One-shot backtest — skipped/partial balances
-remain collectible later, which it doesn't credit.
+## One-pass backtest (single moment)
+
+`POST /v1/backtest` compares cron, always-charge and the active policy at one moment. Over a month
+the picture is different — use the 30-day backtest below.
 
 ## 30-day backtest (2,000 customers, 3 declines each, 3 seeds)
 
@@ -129,15 +124,15 @@ day max, and a monthly decline budget. Same customers and luck for every strateg
 
 | Strategy | Recovered | Failed attempts | Out of declines |
 | --- | --- | --- | --- |
-| Cron only (today) | 38.8–40.9% | ~4,050 | ~60% |
+| Cron only (today) | 38.8–40.9% | ~4,080 | ~60% |
 | Cron + always charge on repayment | 43.0–45.1% | ~3,920 | ~55% |
 | Cron + simple rule on repayment (non-AI) | 41.9–44.5% | ~3,950 | ~56% |
 | Cron + smart partials on repayment | 40.7–42.6% | ~4,100 | ~61% |
-| **Charge on repayment + AI-gated cron** | **42.5–45.2%** | **~2,510** | **~13%** |
+| **Full charge on repayment + AI-gated cron (live policy)** | **42.0–44.7%** | **~2,290** | **~8%** |
 
-AI-gated cron vs cron only: about +9–17% recovered and ~40% fewer failed attempts. Vs always-charge:
-about the same recovery with ~37% fewer failed attempts. Partials at the repayment moment don't pay
-off over a month — the remainder falls back to cron, which fails. Synthetic simulation, not real data.
+Vs cron only: about +8–14% recovered and ~44% fewer failed attempts. Vs always-charge or a simple
+rule: within ~1 point of the recovery with ~41% fewer failed attempts. Synthetic simulation, not
+real data.
 
 ## Deploy
 

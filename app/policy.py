@@ -66,6 +66,34 @@ def schedule_min_prob(declines_left: int | None, settings: Settings) -> float:
     return settings.schedule_min_prob
 
 
+def full_charge_bar(declines_left: int | None, settings: Settings, scheduled: bool) -> float:
+    """Minimum P(success) to spend a decline on charging the full overdue."""
+    if declines_left is not None and declines_left <= 1:
+        if scheduled:
+            return settings.schedule_min_prob_last_decline
+        return settings.repayment_min_prob_last_decline
+    return settings.schedule_min_prob if scheduled else settings.repayment_min_prob
+
+
+def full_charge_gate(
+    model: TrainedModel,
+    bases: list[dict[str, float]],
+    declines_left: list[int | None],
+    settings: Settings,
+    scheduled: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Charge-in-full gate used at repayment moments and on scheduled days.
+
+    The 30-day backtest showed partials don't pay off: the remainder falls back to cron,
+    which charges on a worse day and fails. So the decision is binary — charge the full
+    overdue now, or keep the decline for a better moment. Returns (P, bar, go).
+    """
+    rows = np.array([feature_row(b, 1.0) for b in bases])
+    p = model.predict(rows)
+    bar = np.array([full_charge_bar(d, settings, scheduled) for d in declines_left])
+    return p, bar, p >= bar
+
+
 def choose_many(
     model: TrainedModel,
     bases: list[dict[str, float]],
@@ -116,10 +144,10 @@ def next_best_action(
 ) -> str:
     if declines_left is not None and declines_left <= 0:
         return "No declines left this month — wait for next month's budget; send a soft reminder"
-    if declines_left is not None and declines_left <= 2:
-        return f"Save the last {declines_left} decline(s) for a stronger moment: next repayment or payday window"
     if base["pm_health"] < 0.4:
         return "Ask customer to update payment method (in-app nudge); don't retry this card"
+    if declines_left is not None and declines_left <= 2:
+        return f"Save the last {declines_left} decline(s) for a stronger moment: next repayment or payday window"
     if not base["payday_window"]:
         return "Defer: retry in the payday window (27th–3rd) when funds are likelier"
     if probs_row.max() < 0.3:
