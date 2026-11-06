@@ -25,6 +25,8 @@ class FeatureSet(BaseModel):
     repayment_strength: float = Field(default=1.0, ge=0, le=1)
     overdue_amount: Optional[float] = None
     amount_paid: Optional[float] = None
+    # Scheme declines left this month on the card (Mada 3, Visa/MC 6). Omit if unknown.
+    declines_left: Optional[int] = Field(default=None, ge=0)
 
 
 class DecisionRequest(BaseModel):
@@ -70,6 +72,8 @@ class DecisionResponse(BaseModel):
     candidates: list[Candidate] = Field(default_factory=list)
     model_version: str = ""
     idempotent_replay: bool = False
+    declines_left: Optional[int] = None
+    min_success_prob_applied: Optional[float] = None
 
 
 class BacktestRequest(BaseModel):
@@ -94,6 +98,36 @@ class BacktestResponse(BaseModel):
     customers: int
     total_overdue: float
     strategies: list[StrategyResult]
+    summary: str
+    note: str
+
+
+class MonthBacktestRequest(BaseModel):
+    n: int = Field(default=2000, ge=50, le=10000)
+    seed: int = 2026
+    decline_budget: int = Field(default=3, ge=1, le=10)  # Mada 3, Visa/MC 6
+    harm_weight: Optional[float] = Field(default=None, ge=0, le=5)
+
+
+class MonthStrategyResult(BaseModel):
+    strategy: str
+    attempts: int
+    failed_attempts: int
+    success_rate: float
+    recovered: float
+    recovery_rate: float
+    fail_fees: float
+    customers_fully_cleared: float
+    customers_out_of_declines: float
+    avg_day_first_collection: Optional[float] = None
+
+
+class MonthBacktestResponse(BaseModel):
+    customers: int
+    days: int
+    decline_budget: int
+    total_overdue: float
+    strategies: list[MonthStrategyResult]
     summary: str
     note: str
 

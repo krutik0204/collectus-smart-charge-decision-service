@@ -22,6 +22,24 @@ Frontend → rpm-autopay-service ──POST /v1/decide──▶ smart-charge-dec
 
 Human-set policy limits (`MIN_SUCCESS_PROB`, `HARM_WEIGHT`, `MAX_CHARGE`, `MAX_FAILS_7D`…) always sit above the model.
 
+### Decline budget
+
+Schemes allow only a few declines per card per month (Mada 3, Visa/MC 6). Send
+`features.declines_left` and the bar to spend one rises as slots run out:
+
+| Declines left | Behaviour |
+| --- | --- |
+| not sent / 3+ | normal policy |
+| 2 | P(success) ≥ 60%, failures weighted 1.5× |
+| 1 | P(success) ≥ 75%, failures weighted 2× — save it for a stronger moment |
+| 0 | hard skip |
+
+### Schedule mode (AI-gated cron)
+
+`event_type: "schedule.due"` asks whether a scheduled cron attempt for the full overdue is worth a
+decline. It charges only if P(success) ≥ 10% (≥ 50% when it's the last decline); otherwise it skips
+and keeps the decline for a repayment or payday.
+
 ## Historical data
 
 Synthetic but structured like the real thing: one row per past autocharge attempt with
@@ -60,6 +78,7 @@ AI_DECISION_URL=http://127.0.0.1:8001/v1/decide
 | Method | Path | Purpose |
 | --- | --- | --- |
 | POST | `/v1/decide` | Decision for a `repayment.succeeded` event (contract used by backend) |
+| POST | `/v1/backtest/month` | 30-day simulation with decline budgets: 5 strategies incl. a simple non-AI rule |
 | POST | `/v1/backtest` | Cron vs always-charge vs smart on N simulated customers (`harm_weight` dial optional) |
 | GET | `/v1/model` | Version, coefficients, AUC/Brier, history stats, policy limits |
 | POST | `/v1/model/retrain` | Retrain from history |
@@ -102,6 +121,23 @@ POST /v1/decide
 `harm_weight` trades recovery for customer friction: at `0.25` smart recovers SAR 271k
 (94% of naive) with 38% fewer failed attempts. One-shot backtest — skipped/partial balances
 remain collectible later, which it doesn't credit.
+
+## 30-day backtest (2,000 customers, 3 declines each, 3 seeds)
+
+Each customer gets repayment events on random days, cron on D0/D3/D18/D29, one decline per
+day max, and a monthly decline budget. Same customers and luck for every strategy.
+
+| Strategy | Recovered | Failed attempts | Out of declines |
+| --- | --- | --- | --- |
+| Cron only (today) | 38.8–40.9% | ~4,050 | ~60% |
+| Cron + always charge on repayment | 43.0–45.1% | ~3,920 | ~55% |
+| Cron + simple rule on repayment (non-AI) | 41.9–44.5% | ~3,950 | ~56% |
+| Cron + smart partials on repayment | 40.7–42.6% | ~4,100 | ~61% |
+| **Charge on repayment + AI-gated cron** | **42.5–45.2%** | **~2,510** | **~13%** |
+
+AI-gated cron vs cron only: about +9–17% recovered and ~40% fewer failed attempts. Vs always-charge:
+about the same recovery with ~37% fewer failed attempts. Partials at the repayment moment don't pay
+off over a month — the remainder falls back to cron, which fails. Synthetic simulation, not real data.
 
 ## Deploy
 

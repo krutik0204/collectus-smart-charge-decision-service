@@ -36,9 +36,34 @@ def feature_row(base: dict[str, float], charge_fraction: float) -> np.ndarray:
     return np.array([float(values[f]) for f in FEATURES])
 
 
-def expected_value(p: np.ndarray, amount: np.ndarray, settings: Settings) -> np.ndarray:
-    loss = settings.fail_fee + settings.harm_weight * amount
+def expected_value(
+    p: np.ndarray, amount: np.ndarray, settings: Settings, harm_weight: np.ndarray | float | None = None
+) -> np.ndarray:
+    harm = settings.harm_weight if harm_weight is None else harm_weight
+    loss = settings.fail_fee + harm * amount
     return p * amount - (1 - p) * loss
+
+
+def budget_limits(declines_left: int | None, settings: Settings) -> tuple[float, float]:
+    """(min success probability, harm weight) for a customer's remaining decline budget.
+
+    Schemes allow only a few declines a month (Mada 3, Visa/MC 6), so the last slots are
+    worth more: the fewer left, the higher the bar to spend one. None = budget unknown.
+    """
+    if declines_left is None or declines_left >= 3:
+        return settings.min_success_prob, settings.harm_weight
+    if declines_left == 2:
+        return settings.budget_min_prob_2_left, settings.harm_weight * settings.budget_harm_multiplier_2_left
+    if declines_left == 1:
+        return settings.budget_min_prob_1_left, settings.harm_weight * settings.budget_harm_multiplier_1_left
+    return 1.01, settings.harm_weight  # 0 left: never attempt (the hard gate also catches this)
+
+
+def schedule_min_prob(declines_left: int | None, settings: Settings) -> float:
+    """Bar for a scheduled attempt: block hopeless ones, and guard the last decline."""
+    if declines_left is not None and declines_left <= 1:
+        return settings.schedule_min_prob_last_decline
+    return settings.schedule_min_prob
 
 
 def choose_many(
@@ -46,6 +71,7 @@ def choose_many(
     bases: list[dict[str, float]],
     overdue: np.ndarray,
     settings: Settings,
+    declines_left: list[int | None] | None = None,
 ) -> tuple[list[Choice], np.ndarray]:
     """Vectorized policy over many customers. Returns choices + P matrix [n, candidates]."""
     n, k = len(bases), len(CANDIDATE_FRACTIONS)
@@ -53,7 +79,10 @@ def choose_many(
     probs = model.predict(rows).reshape(n, k)
     fractions = np.array(CANDIDATE_FRACTIONS)
     amounts = np.minimum(np.round(overdue[:, None] * fractions[None, :], 2), settings.max_charge)
-    ev = expected_value(probs, amounts, settings)
+    limits = [budget_limits(d, settings) for d in (declines_left or [None] * n)]
+    min_prob = np.array([m for m, _ in limits])
+    harm = np.array([h for _, h in limits])
+    ev = expected_value(probs, amounts, settings, harm[:, None])
     # Tiny partials are not worth the customer noise.
     too_small = (amounts < settings.min_charge) & (fractions[None, :] < 1.0)
     ev = np.where(too_small, -np.inf, ev)
@@ -62,7 +91,7 @@ def choose_many(
     for i in range(n):
         j = int(np.argmax(ev[i]))
         p, amt, best = float(probs[i, j]), float(amounts[i, j]), float(ev[i, j])
-        if best <= 0 or p < settings.min_success_prob:
+        if best <= 0 or p < min_prob[i]:
             choices.append(Choice("skip", 0.0, 0.0, float(probs[i, 0]), best))
         else:
             action = "charge" if fractions[j] == 1.0 else "partial"
@@ -70,15 +99,25 @@ def choose_many(
     return choices, probs
 
 
-def hard_gate(overdue_amount: float, fails_7d: int, settings: Settings) -> str | None:
+def hard_gate(
+    overdue_amount: float, fails_7d: int, settings: Settings, declines_left: int | None = None
+) -> str | None:
     if overdue_amount <= 0:
         return "No eligible overdue balance"
+    if declines_left is not None and declines_left <= 0:
+        return "Decline budget used up for this month (scheme limit)"
     if fails_7d >= settings.max_fails_7d:
         return f"Attempt cap: {fails_7d} failed attempts in 7 days (cap {settings.max_fails_7d})"
     return None
 
 
-def next_best_action(base: dict[str, float], probs_row: np.ndarray) -> str:
+def next_best_action(
+    base: dict[str, float], probs_row: np.ndarray, declines_left: int | None = None
+) -> str:
+    if declines_left is not None and declines_left <= 0:
+        return "No declines left this month — wait for next month's budget; send a soft reminder"
+    if declines_left is not None and declines_left <= 2:
+        return f"Save the last {declines_left} decline(s) for a stronger moment: next repayment or payday window"
     if base["pm_health"] < 0.4:
         return "Ask customer to update payment method (in-app nudge); don't retry this card"
     if not base["payday_window"]:
@@ -101,7 +140,7 @@ def describe(choice: Choice, probs_row: np.ndarray, overdue: float, currency: st
             f"— best expected recovery, partial charge"
         )
     else:
-        head = f"P(success) {full_p:.0%} at full amount; no charge has positive expected value — skip"
+        head = f"P(success) {full_p:.0%} at full amount; no charge clears the bar — skip"
     return f"{head}. Drivers: {why}"
 
 

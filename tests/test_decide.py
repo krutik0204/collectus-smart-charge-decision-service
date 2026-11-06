@@ -53,3 +53,39 @@ def test_backtest_smart_fails_less():
     by_name = {s["strategy"]: s for s in result["strategies"]}
     assert by_name["smart_charge"]["failed_attempts"] < by_name["always_charge_on_event"]["failed_attempts"]
     assert by_name["smart_charge"]["success_rate"] > by_name["cron_nightly"]["success_rate"]
+
+
+def _with(body, **extra):
+    body = {**body, "features": {**body["features"], **extra.pop("features", {})}}
+    return {**body, **extra}
+
+
+def test_decline_budget_raises_the_bar():
+    with TestClient(app) as client:
+        normal_day = "2026-11-06"  # outside the payday window
+        plenty = client.post("/v1/decide", json=_with(_body("t_b3", 0.55, 2, 0.45, 249.75, as_of=normal_day), features={"declines_left": 3})).json()
+        last = client.post("/v1/decide", json=_with(_body("t_b1", 0.55, 2, 0.45, 249.75, as_of=normal_day), features={"declines_left": 1})).json()
+        none = client.post("/v1/decide", json=_with(_body("t_b0", 0.9, 0, 0.85, 45.0), features={"declines_left": 0})).json()
+    assert plenty["action"] == "partial"
+    assert last["action"] == "skip" and last["min_success_prob_applied"] == 0.75
+    assert "decline" in last["next_best_action"].lower()
+    assert none["action"] == "skip" and "Decline budget used up" in none["gate"]
+
+
+def test_schedule_mode_blocks_hopeless_cron_attempts():
+    with TestClient(app) as client:
+        weak = client.post("/v1/decide", json=_with(_body("t_s_weak", 0.25, 4, 0.15, 130.0), event_type="schedule.due")).json()
+        strong = client.post("/v1/decide", json=_with(_body("t_s_ok", 0.9, 0, 0.85, 45.0), event_type="schedule.due")).json()
+    assert weak["action"] == "skip" and weak["score"] < 0.10
+    assert strong["action"] == "charge" and strong["amount"] == 45.0
+
+
+def test_month_backtest_ai_gated_cron_saves_declines():
+    with TestClient(app) as client:
+        result = client.post("/v1/backtest/month", json={"n": 1000}).json()
+    by = {s["strategy"]: s for s in result["strategies"]}
+    ai, cron = by["charge_on_repayment_plus_ai_gated_cron"], by["cron_only"]
+    naive = by["cron_plus_always_charge_on_repayment"]
+    assert ai["recovered"] > cron["recovered"]
+    assert ai["failed_attempts"] < 0.75 * naive["failed_attempts"]
+    assert ai["customers_out_of_declines"] < naive["customers_out_of_declines"]

@@ -25,6 +25,16 @@ class Settings(BaseSettings):
     max_charge: float = 5000.0
     max_fails_7d: int = 5
 
+    # Decline budget (schemes allow few declines per month): higher bar as slots run out
+    budget_min_prob_2_left: float = 0.60
+    budget_harm_multiplier_2_left: float = 1.5
+    budget_min_prob_1_left: float = 0.75
+    budget_harm_multiplier_1_left: float = 2.0
+
+    # Schedule mode: AI approves or blocks a scheduled (cron) attempt for the full overdue
+    schedule_min_prob: float = 0.10
+    schedule_min_prob_last_decline: float = 0.50
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
