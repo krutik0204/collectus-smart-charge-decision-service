@@ -23,9 +23,38 @@ FEATURES = [
     "charge_fraction",
     "trigger_event",
     "payday_window",
+    # Card type (baseline: Mada, plastic card, debit)
+    "network_visa",
+    "network_mastercard",
+    "apple_pay",
+    "funding_credit",
+    "funding_prepaid",
 ]
 
+CARD_NETWORKS = ("mada", "visa", "mastercard")
+CARD_TOKENS = ("plastic", "apple_pay")
+CARD_FUNDING = ("debit", "credit", "prepaid")
+# Scheme decline limits per card per month (Mada 3, Visa/Mastercard 6)
+NETWORK_DECLINE_LIMIT = {"mada": 3, "visa": 6, "mastercard": 6}
+
 DECLINE_CODES = ["insufficient_funds", "do_not_honor", "card_expired", "limit_exceeded"]
+
+
+def card_features(network: str | None, token: str | None, funding: str | None) -> dict[str, int]:
+    """One-hot card type. Unknown values fall back to the baseline (Mada, plastic, debit)."""
+    return {
+        "network_visa": int(network == "visa"),
+        "network_mastercard": int(network == "mastercard"),
+        "apple_pay": int(token == "apple_pay"),
+        "funding_credit": int(funding == "credit"),
+        "funding_prepaid": int(funding == "prepaid"),
+    }
+
+
+def card_label(network: str | None, token: str | None, funding: str | None) -> str:
+    names = {"mada": "Mada", "visa": "Visa", "mastercard": "Mastercard"}
+    wallet = "Apple Pay" if token == "apple_pay" else "card"
+    return f"{names.get(network or 'mada', 'Mada')} {funding or 'debit'} {wallet}"
 
 
 def payday_window(day_of_month: int) -> int:
@@ -44,12 +73,43 @@ def true_success_probability(x: dict[str, np.ndarray]) -> np.ndarray:
         - 2.0 * x["charge_fraction"]
         + 0.6 * x["trigger_event"]
         + 0.5 * x["payday_window"]
+        # Card type — invented synthetic effects, not real Tamara rates
+        - 0.15 * x["network_visa"]
+        - 0.05 * x["network_mastercard"]
+        + 0.35 * x["apple_pay"]
+        + 0.40 * x["funding_credit"]
+        - 0.90 * x["funding_prepaid"]
     )
     return 1.0 / (1.0 + np.exp(-z))
 
 
-def sample_customers(n: int, rng: np.random.Generator) -> dict[str, np.ndarray]:
-    """Customer state at the moment an overdue balance exists."""
+def sample_cards(n: int, rng: np.random.Generator) -> dict[str, np.ndarray]:
+    """Card on file: network, wallet and funding type. Mada cards are always debit."""
+    network = rng.choice(CARD_NETWORKS, n, p=[0.55, 0.33, 0.12])
+    token = np.where(rng.random(n) < 0.4, "apple_pay", "plastic")
+    funding = np.where(
+        network == "mada", "debit", rng.choice(CARD_FUNDING, n, p=[0.55, 0.35, 0.10])
+    )
+    return {
+        "card_network": network,
+        "card_token": token,
+        "card_funding": funding,
+        "network_visa": (network == "visa").astype(int),
+        "network_mastercard": (network == "mastercard").astype(int),
+        "apple_pay": (token == "apple_pay").astype(int),
+        "funding_credit": (funding == "credit").astype(int),
+        "funding_prepaid": (funding == "prepaid").astype(int),
+        "decline_limit": np.array([NETWORK_DECLINE_LIMIT[k] for k in network]),
+    }
+
+
+def sample_customers(
+    n: int, rng: np.random.Generator, card_rng: np.random.Generator | None = None
+) -> dict[str, np.ndarray]:
+    """Customer state at the moment an overdue balance exists.
+
+    Cards come from a separate generator so the other draws stay the same as before.
+    """
     pm_health = rng.beta(4, 2, n)
     recent_success = np.clip(
         0.6 * pm_health + 0.4 * rng.beta(2, 2, n) + rng.normal(0, 0.05, n), 0, 1
@@ -63,6 +123,7 @@ def sample_customers(n: int, rng: np.random.Generator) -> dict[str, np.ndarray]:
         "fails_7d": fails_7d,
         "days_overdue": days_overdue,
         "overdue_amount": overdue_amount,
+        **sample_cards(n, card_rng or np.random.default_rng(0)),
     }
 
 
@@ -70,7 +131,7 @@ def generate_history(n: int, seed: int = 42, today: date | None = None) -> list[
     """Historical autocharge attempts: ~35% event-triggered, the rest cron."""
     rng = np.random.default_rng(seed)
     today = today or date.today()
-    x = sample_customers(n, rng)
+    x = sample_customers(n, rng, np.random.default_rng(seed + 1))
 
     trigger_event = (rng.random(n) < 0.35).astype(int)
     amount_paid = np.where(
@@ -117,6 +178,14 @@ def generate_history(n: int, seed: int = 42, today: date | None = None) -> list[
                 "charge_amount": round(float(x["overdue_amount"][i] * charge_fraction[i]), 2),
                 "trigger_event": int(trigger_event[i]),
                 "payday_window": int(payday[i]),
+                "card_network": str(x["card_network"][i]),
+                "card_token": str(x["card_token"][i]),
+                "card_funding": str(x["card_funding"][i]),
+                "network_visa": int(x["network_visa"][i]),
+                "network_mastercard": int(x["network_mastercard"][i]),
+                "apple_pay": int(x["apple_pay"][i]),
+                "funding_credit": int(x["funding_credit"][i]),
+                "funding_prepaid": int(x["funding_prepaid"][i]),
                 "success": int(success[i]),
                 "decline_code": decline,
             }

@@ -18,6 +18,8 @@ from sklearn.preprocessing import StandardScaler
 
 from app.world import FEATURES, generate_history
 
+CARD_FEATURES = {"network_visa", "network_mastercard", "apple_pay", "funding_credit", "funding_prepaid"}
+
 FEATURE_LABELS = {
     "pm_health": "payment method health",
     "recent_success": "recent payment success",
@@ -27,6 +29,11 @@ FEATURE_LABELS = {
     "charge_fraction": "size of charge vs overdue",
     "trigger_event": "charging right after activity",
     "payday_window": "payday window",
+    "network_visa": "Visa card",
+    "network_mastercard": "Mastercard card",
+    "apple_pay": "Apple Pay",
+    "funding_credit": "credit card",
+    "funding_prepaid": "prepaid card",
 }
 
 
@@ -51,6 +58,8 @@ class TrainedModel:
             name = FEATURES[idx]
             if name == "trigger_event":
                 continue  # constant on the decide path; not informative per customer
+            if name in CARD_FEATURES and row[idx] == 0:
+                continue  # only mention the card type the customer actually has
             out.append(
                 {
                     "feature": name,

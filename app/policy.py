@@ -72,6 +72,8 @@ def full_charge_bar(declines_left: int | None, settings: Settings, scheduled: bo
         if scheduled:
             return settings.schedule_min_prob_last_decline
         return settings.repayment_min_prob_last_decline
+    if declines_left is not None and declines_left >= settings.plenty_declines_from:
+        return settings.plenty_min_prob
     return settings.schedule_min_prob if scheduled else settings.repayment_min_prob
 
 

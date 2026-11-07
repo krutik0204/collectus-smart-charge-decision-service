@@ -23,7 +23,7 @@ from app.schemas import (
     MonthBacktestRequest,
     MonthBacktestResponse,
 )
-from app.world import FEATURES, payday_window
+from app.world import FEATURES, card_features, card_label, payday_window
 
 settings = get_settings()
 state: dict[str, object] = {"model": None, "decisions": {}}
@@ -86,7 +86,9 @@ def decide(body: DecisionRequest) -> DecisionResponse:
         "repayment_strength": f.repayment_strength,
         "trigger_event": 1,
         "payday_window": payday_window(as_of.day),
+        **card_features(f.card_network, f.card_token, f.card_funding),
     }
+    card = card_label(f.card_network, f.card_token, f.card_funding)
 
     declines_left = f.declines_left
     min_prob, harm = policy.budget_limits(declines_left, settings)
@@ -104,6 +106,7 @@ def decide(body: DecisionRequest) -> DecisionResponse:
             next_best_action=policy.next_best_action(base, np.zeros(1), declines_left),
             model_version=model.version,
             declines_left=declines_left,
+            card=card,
         )
     elif schedule_mode or settings.repayment_policy == "full_gate":
         # Charge the full overdue only if it's worth spending a decline on.
@@ -113,7 +116,7 @@ def decide(body: DecisionRequest) -> DecisionResponse:
         p, bar, go = float(p_arr[0]), float(bar_arr[0]), bool(go_arr[0])
         drivers = model.drivers(policy.feature_row(base, 1.0))
         why = ", ".join(f"{d['direction']}{d['label']}" for d in drivers)
-        moment = "Scheduled attempt" if schedule_mode else "Repayment moment"
+        moment = f"{'Scheduled attempt' if schedule_mode else 'Repayment moment'} on a {card}"
         budget = (
             f" Decline budget: {declines_left} left this month, so the bar is {bar:.0%}."
             if declines_left is not None and declines_left <= 1
@@ -147,6 +150,7 @@ def decide(body: DecisionRequest) -> DecisionResponse:
             model_version=model.version,
             declines_left=declines_left,
             min_success_prob_applied=bar,
+            card=card,
         )
     else:
         overdue = np.array([body.overdue_amount])
@@ -178,6 +182,7 @@ def decide(body: DecisionRequest) -> DecisionResponse:
             model_version=model.version,
             declines_left=declines_left,
             min_success_prob_applied=min_prob,
+            card=card,
         )
 
     decisions[body.event_id] = response
@@ -197,7 +202,9 @@ def run_month_backtest(body: MonthBacktestRequest) -> MonthBacktestResponse:
     policy_settings = settings
     if body.harm_weight is not None:
         policy_settings = settings.model_copy(update={"harm_weight": body.harm_weight})
-    return backtest_month.run(_model(), policy_settings, body.n, body.seed, body.decline_budget)
+    return backtest_month.run(
+        _model(), policy_settings, body.n, body.seed, body.decline_budget, body.decline_budget_visa_mc
+    )
 
 
 @app.get("/v1/model", response_model=ModelInfo)

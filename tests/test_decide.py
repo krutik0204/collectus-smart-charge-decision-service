@@ -91,3 +91,26 @@ def test_month_backtest_ai_gated_cron_saves_declines():
     assert ai["recovered"] > cron["recovered"]
     assert ai["failed_attempts"] < 0.75 * naive["failed_attempts"]
     assert ai["customers_out_of_declines"] < naive["customers_out_of_declines"]
+
+
+def test_card_type_changes_the_odds_and_shows_in_the_reason():
+    def with_card(eid, network=None, token=None, funding=None):
+        card = {k: v for k, v in (("card_network", network), ("card_token", token), ("card_funding", funding)) if v}
+        return _with(_body(eid, 0.6, 1, 0.55, 249.75, as_of="2026-11-06"), features=card)
+
+    with TestClient(app) as client:
+        baseline = client.post("/v1/decide", json=with_card("t_c_base")).json()
+        mada = client.post("/v1/decide", json=with_card("t_c_mada", "mada", "plastic", "debit")).json()
+        credit = client.post("/v1/decide", json=with_card("t_c_credit", "visa", "apple_pay", "credit")).json()
+        prepaid = client.post("/v1/decide", json=with_card("t_c_prepaid", "visa", "plastic", "prepaid")).json()
+        bad = client.post("/v1/decide", json=with_card("t_c_bad", "amex")).json()
+    assert baseline["score"] == mada["score"]  # omitted card = Mada plastic debit
+    assert prepaid["score"] < baseline["score"] < credit["score"]
+    assert "Visa prepaid card" in prepaid["reason"] and prepaid["card"] == "Visa prepaid card"
+    assert "detail" in bad  # unknown network is rejected
+
+
+def test_month_backtest_uses_network_decline_limits():
+    with TestClient(app) as client:
+        result = client.post("/v1/backtest/month", json={"n": 500, "decline_budget": 3, "decline_budget_visa_mc": 6}).json()
+    assert result["decline_budget"] == 3 and result["decline_budget_visa_mc"] == 6

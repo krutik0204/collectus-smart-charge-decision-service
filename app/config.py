@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     schedule_min_prob: float = 0.10
     schedule_min_prob_last_decline: float = 0.50
 
+    # Plenty of declines left (e.g. a Visa/Mastercard card early in the month): try more freely
+    plenty_declines_from: int = 3
+    plenty_min_prob: float = 0.05
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

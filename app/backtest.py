@@ -39,7 +39,7 @@ def _result(name: str, attempted: np.ndarray, amount: np.ndarray, success: np.nd
 
 def run(model: TrainedModel, settings: Settings, n: int, seed: int) -> BacktestResponse:
     rng = np.random.default_rng(seed)
-    x = sample_customers(n, rng)
+    x = sample_customers(n, rng, np.random.default_rng(seed + 1))
     overdue = x["overdue_amount"]
     # Each customer just repaid something (the triggering event)
     amount_paid = np.round(overdue * rng.uniform(0.3, 1.5, n), 2)
@@ -75,6 +75,11 @@ def run(model: TrainedModel, settings: Settings, n: int, seed: int) -> BacktestR
             "repayment_strength": repay[i],
             "trigger_event": 1,
             "payday_window": payday[i],
+            "network_visa": x["network_visa"][i],
+            "network_mastercard": x["network_mastercard"][i],
+            "apple_pay": x["apple_pay"][i],
+            "funding_credit": x["funding_credit"][i],
+            "funding_prepaid": x["funding_prepaid"][i],
         }
         for i in range(n)
     ]

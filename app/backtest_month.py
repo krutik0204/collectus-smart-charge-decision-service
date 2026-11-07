@@ -3,7 +3,7 @@
 Each simulated customer starts the month with an overdue balance. During the month:
 - Some customers make repayments (activity events) on random days.
 - Cron runs on a fixed schedule (D0, D3, D18, D29), always charging the full remaining overdue.
-- Every failed attempt uses one of the month's scheme declines (default 3, like Mada);
+- Every failed attempt uses one of the month's scheme declines (Mada 3, Visa/Mastercard 6);
   with none left, the card can't be charged. After a decline, no more attempts that day.
 - Failed attempts count towards fails_7d for 7 days.
 
@@ -35,7 +35,7 @@ class _World:
     def __init__(self, n: int, seed: int, days: int) -> None:
         rng = np.random.default_rng(seed)
         self.n, self.days = n, days
-        self.x = sample_customers(n, rng)
+        self.x = sample_customers(n, rng, np.random.default_rng(seed + 1))
         self.overdue0 = self.x["overdue_amount"]
         events = rng.poisson(1.0, n)  # repayment events this month
         self.event_day = np.zeros((n, days), dtype=bool)
@@ -50,11 +50,11 @@ class _World:
         self.payday = np.array([payday_window(d + 1) for d in range(days)])
 
 
-def _simulate(world: _World, name: str, budget: int, on_event: Optional[Policy],
+def _simulate(world: _World, name: str, budget: np.ndarray, on_event: Optional[Policy],
               on_cron: Optional[Policy], settings: Settings) -> MonthStrategyResult:
     n, days, x = world.n, world.days, world.x
     remaining = world.overdue0.copy()
-    declines_left = np.full(n, budget)
+    declines_left = budget.copy()
     fail_hist = np.zeros((n, days), dtype=bool)
     first_collect = np.full(n, -1)
     attempts = successes = 0
@@ -132,9 +132,10 @@ def _simulate(world: _World, name: str, budget: int, on_event: Optional[Policy],
 
 
 def run(model: TrainedModel, settings: Settings, n: int, seed: int, budget: int,
-        days: int = 30) -> MonthBacktestResponse:
+        budget_visa_mc: int = 6, days: int = 30) -> MonthBacktestResponse:
     world = _World(n, seed, days)
     x = world.x
+    budgets = np.where(x["card_network"] == "mada", budget, budget_visa_mc)
 
     def full(mask: np.ndarray, _: dict) -> np.ndarray:
         return np.where(mask, 1.0, 0.0)
@@ -158,6 +159,11 @@ def run(model: TrainedModel, settings: Settings, n: int, seed: int, budget: int,
                     "repayment_strength": s["repay"][i] if trigger else 0.0,
                     "trigger_event": trigger,
                     "payday_window": s["payday"],
+                    "network_visa": x["network_visa"][i],
+                    "network_mastercard": x["network_mastercard"][i],
+                    "apple_pay": x["apple_pay"][i],
+                    "funding_credit": x["funding_credit"][i],
+                    "funding_prepaid": x["funding_prepaid"][i],
                 }
                 for i in idx
             ]
@@ -183,6 +189,11 @@ def run(model: TrainedModel, settings: Settings, n: int, seed: int, budget: int,
                     "repayment_strength": 0.0 if scheduled else s["repay"][i],
                     "trigger_event": 0 if scheduled else 1,
                     "payday_window": s["payday"],
+                    "network_visa": x["network_visa"][i],
+                    "network_mastercard": x["network_mastercard"][i],
+                    "apple_pay": x["apple_pay"][i],
+                    "funding_credit": x["funding_credit"][i],
+                    "funding_prepaid": x["funding_prepaid"][i],
                 }
                 for i in idx
             ]
@@ -193,11 +204,11 @@ def run(model: TrainedModel, settings: Settings, n: int, seed: int, budget: int,
         return decide
 
     strategies = [
-        _simulate(world, "cron_only", budget, None, full, settings),
-        _simulate(world, "cron_plus_always_charge_on_repayment", budget, full, full, settings),
-        _simulate(world, "cron_plus_simple_rule_on_repayment", budget, rule, full, settings),
-        _simulate(world, "cron_plus_smart_partials_on_repayment", budget, smart(1), full, settings),
-        _simulate(world, "charge_on_repayment_plus_ai_gated_cron", budget, ai_full_gate(False),
+        _simulate(world, "cron_only", budgets, None, full, settings),
+        _simulate(world, "cron_plus_always_charge_on_repayment", budgets, full, full, settings),
+        _simulate(world, "cron_plus_simple_rule_on_repayment", budgets, rule, full, settings),
+        _simulate(world, "cron_plus_smart_partials_on_repayment", budgets, smart(1), full, settings),
+        _simulate(world, "charge_on_repayment_plus_ai_gated_cron", budgets, ai_full_gate(False),
                   ai_full_gate(True), settings),
     ]
     by = {s.strategy: s for s in strategies}
@@ -208,7 +219,8 @@ def run(model: TrainedModel, settings: Settings, n: int, seed: int, budget: int,
         return f"{(a / b - 1):+.0%}" if b else "n/a"
 
     summary = (
-        f"Over {days} days with {budget} declines per customer, charging on repayment with an "
+        f"Over {days} days ({budget} declines per Mada card, {budget_visa_mc} per Visa/Mastercard), "
+        f"charging on repayment with an "
         f"AI-gated cron recovers {ai.recovery_rate:.1%} of overdue vs {cron.recovery_rate:.1%} for "
         f"cron only ({pct(ai.recovered, cron.recovered)}) with "
         f"{pct(ai.failed_attempts, cron.failed_attempts)} failed attempts; vs always-charge "
@@ -220,6 +232,7 @@ def run(model: TrainedModel, settings: Settings, n: int, seed: int, budget: int,
         customers=n,
         days=days,
         decline_budget=budget,
+        decline_budget_visa_mc=budget_visa_mc,
         total_overdue=round(float(world.overdue0.sum()), 2),
         strategies=strategies,
         summary=summary,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,6 +27,10 @@ class FeatureSet(BaseModel):
     amount_paid: Optional[float] = None
     # Scheme declines left this month on the card (Mada 3, Visa/MC 6). Omit if unknown.
     declines_left: Optional[int] = Field(default=None, ge=0)
+    # Card on file. Omitted = baseline (Mada, plastic, debit).
+    card_network: Optional[Literal["mada", "visa", "mastercard"]] = None
+    card_token: Optional[Literal["plastic", "apple_pay"]] = None
+    card_funding: Optional[Literal["debit", "credit", "prepaid"]] = None
 
 
 class DecisionRequest(BaseModel):
@@ -74,6 +78,7 @@ class DecisionResponse(BaseModel):
     idempotent_replay: bool = False
     declines_left: Optional[int] = None
     min_success_prob_applied: Optional[float] = None
+    card: Optional[str] = None
 
 
 class BacktestRequest(BaseModel):
@@ -105,7 +110,8 @@ class BacktestResponse(BaseModel):
 class MonthBacktestRequest(BaseModel):
     n: int = Field(default=2000, ge=50, le=10000)
     seed: int = 2026
-    decline_budget: int = Field(default=3, ge=1, le=10)  # Mada 3, Visa/MC 6
+    decline_budget: int = Field(default=3, ge=1, le=10)  # Mada
+    decline_budget_visa_mc: int = Field(default=6, ge=1, le=12)  # Visa / Mastercard
     harm_weight: Optional[float] = Field(default=None, ge=0, le=5)
 
 
@@ -126,6 +132,7 @@ class MonthBacktestResponse(BaseModel):
     customers: int
     days: int
     decline_budget: int
+    decline_budget_visa_mc: int
     total_overdue: float
     strategies: list[MonthStrategyResult]
     summary: str
