@@ -149,7 +149,8 @@ def next_best_action(
     if base["pm_health"] < 0.4:
         return "Ask customer to update payment method (in-app nudge); don't retry this card"
     if declines_left is not None and declines_left <= 2:
-        return f"Save the last {declines_left} decline(s) for a stronger moment: next repayment or payday window"
+        left = "the last decline" if declines_left == 1 else f"the last {declines_left} declines"
+        return f"Save {left} for a stronger moment: next repayment or payday window"
     if not base["payday_window"]:
         return "Defer: retry in the payday window (27th–3rd) when funds are likelier"
     if probs_row.max() < 0.3:
